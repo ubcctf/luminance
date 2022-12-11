@@ -1,2 +1,2 @@
-twisted
+twisted[tls]
 git+https://github.com/ubcctf/lumina_structs

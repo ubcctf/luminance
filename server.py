@@ -1,7 +1,7 @@
 from twisted.enterprise import adbapi
 from twisted.internet.protocol import Protocol, Factory
-from twisted.internet.endpoints import TCP4ServerEndpoint
-from twisted.internet import reactor
+from twisted.internet.endpoints import TCP4ServerEndpoint, SSL4ServerEndpoint
+from twisted.internet import reactor, ssl
 from twisted.logger import Logger, textFileLogObserver, globalLogPublisher
 from twisted.enterprise.adbapi import Transaction
 
@@ -9,12 +9,6 @@ from lumina_structs import *
 from construct import StreamError
 
 import hashlib, sys
-
-log = Logger()
-
-
-#TODO configurable filename
-db = adbapi.ConnectionPool('sqlite3', 'data.db', check_same_thread=False)
 
 class LuminaRPC(Protocol):
 
@@ -144,25 +138,48 @@ class LuminaRPCFactory(Factory):
     def buildProtocol(self, addr):
         return LuminaRPC(addr)
 
+if __name__ == "__main__":
+    import argparse
 
-#initialize database
-#TODO save last seen / hostname / license id / watermark?
-db.runQuery('CREATE TABLE IF NOT EXISTS users'
-        +   '(name          TEXT PRIMARY KEY,'   #we don't expect a lot of users to be registered, so string as key should be alright
-        +   ' password      TEXT);')
-#TODO save database / binary path / addresses?
-db.runQuery('CREATE TABLE IF NOT EXISTS funcs'
-        +   '(signature     BLOB NOT NULL,'      #this is what we use to search up functions (but since it's not unique we can't make it primary key); assume all signatures are v1 for now
-        +   ' name          TEXT,'
-        +   ' size          INTEGER,'
-        +   ' metadata      BLOB,'
-        +   ' rank          INTEGER,'            #internal use only; for determining which metadata is more high quality and is to be returned on PULL_MD
-        +   ' username      TEXT);') 
+    parser = argparse.ArgumentParser(description='Runs a portable Lumina server at the specified host and port.')
+    parser.add_argument('-i', '--interface', type=str, default="0.0.0.0", help='the address to listen on, defaults to 0.0.0.0')
+    parser.add_argument('-p', '--port', type=int, default=4443, help='the port to listen on, defaults to 4443')
+    parser.add_argument('-c', '--cert', type=argparse.FileType('rb'), default=None, help='enables TLS mode, specifying the certificate path that includes the key')
+    parser.add_argument('-db', '--database', type=str, default='data.db', help='database file name, defaults to data.db')
+
+    args = parser.parse_args()
 
 
-#TODO configurable listen host and port
-endpoint = TCP4ServerEndpoint(reactor, 4443)
-endpoint.listen(LuminaRPCFactory())
-globalLogPublisher.addObserver(textFileLogObserver(sys.stdout))
-log.info('Server started at 0.0.0.0:4443.')
-reactor.run()
+    log = Logger()
+
+
+    db = adbapi.ConnectionPool('sqlite3', args.database, check_same_thread=False)
+
+    #initialize database
+    #TODO save last seen / hostname / license id / watermark?
+    db.runQuery('CREATE TABLE IF NOT EXISTS users'
+            +   '(name          TEXT PRIMARY KEY,'   #we don't expect a lot of users to be registered, so string as key should be alright
+            +   ' password      TEXT);')
+    #TODO save database / binary path / addresses?
+    db.runQuery('CREATE TABLE IF NOT EXISTS funcs'
+            +   '(signature     BLOB NOT NULL,'      #this is what we use to search up functions (but since it's not unique we can't make it primary key); assume all signatures are v1 for now
+            +   ' name          TEXT,'
+            +   ' size          INTEGER,'
+            +   ' metadata      BLOB,'
+            +   ' rank          INTEGER,'            #internal use only; for determining which metadata is more high quality and is to be returned on PULL_MD
+            +   ' username      TEXT);') 
+
+
+    if args.cert:
+        #if the cert file doesnt have a key in pem format appended to it, openssl throws out arcane errors
+        #aka you'd want to do sth like `openssl req -nodes -x509 -newkey rsa:4096 -keyout key.pem -out server.pem -days 365 -subj '/CN=www.maplebacon.org/O=Maple Bacon/C=XX' && cp server.pem client.pem && cat key.pem >> server.pem`
+        #also -addext "subjectAltName =IP:127.0.0.1" will be needed for python >3.7 clients on localhost testing or else verify would fail
+        cert = ssl.PrivateCertificate.loadPEM(args.cert.read())
+        endpoint = SSL4ServerEndpoint(reactor, port=args.port, sslContextFactory=cert.options(), interface=args.interface)
+    else:
+        endpoint = TCP4ServerEndpoint(reactor, port=args.port, interface=args.interface)
+        
+    endpoint.listen(LuminaRPCFactory())
+    globalLogPublisher.addObserver(textFileLogObserver(sys.stdout))
+    log.info(f'Server started at {args.interface}:{args.port} (TLS: {args.cert is not None}).')
+    reactor.run()
