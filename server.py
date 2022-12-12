@@ -80,7 +80,7 @@ class LuminaRPC(Protocol):
         #handle rest of the packets
         else:
             if pkt.code == RPC_TYPE.PULL_MD:
-                def reply_pull(data: list[list]):
+                def reply_pull(data):
                     flags, mds = [], []
                     for sig in msg.funcInfos:
                         md = next((d for d in data if d[0] == sig.signature), None)
