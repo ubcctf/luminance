@@ -38,7 +38,7 @@ class LuminaRPC(Protocol):
                 #(IDA license check's MD5Update treats this as an empty line so we can safely put our content without breaking IDA)
                 if b'\0' in msg.hexrays_license:
                     user, password = [s.strip() for s in msg.hexrays_license.decode().split('\n\0', 3)[1:]]
-                elif len(authstr:=msg.hexrays_license.decode().split('\n')) == 2:
+                elif len(authstr:=msg.hexrays_license.decode().strip().split('\n')) == 2:
                     #connecting client is third party that doesnt need to follow the ida.key format, also accept that as the auth string
                     user, password = [s.strip() for s in authstr]
                 else:
