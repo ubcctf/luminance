@@ -12,10 +12,11 @@ import hashlib, sys
 
 class LuminaRPC(Protocol):
 
-    def __init__(self, addr):
+    def __init__(self, addr, reqAuth):
         self.authenticated = False
         self.user = None
         self.addr = addr
+        self.reqAuth = reqAuth
 
     def dataReceived(self, data):
         #catch erroneous packets
@@ -30,47 +31,53 @@ class LuminaRPC(Protocol):
         #auth
         if not self.authenticated:
             if pkt.code == RPC_TYPE.RPC_HELO:
-                #TODO support HELOv2
+                if self.reqAuth:
+                    #TODO support HELOv2
 
-                #for the original packet, we auth with user and password in ida.key
+                    #for the original packet, we auth with user and password in ida.key
 
-                #read the first line that starts with a null byte 
-                #(IDA license check's MD5Update treats this as an empty line so we can safely put our content without breaking IDA)
-                if b'\0' in msg.hexrays_license:
-                    user, password = [s.strip() for s in msg.hexrays_license.decode().split('\n\0', 3)[1:]]
-                elif len(authstr:=msg.hexrays_license.decode().strip().split('\n')) == 2:
-                    #connecting client is third party that doesnt need to follow the ida.key format, also accept that as the auth string
-                    user, password = [s.strip() for s in authstr]
-                else:
-                    self.transport.write(rpc_message_build(RPC_TYPE.RPC_FAIL, status=0, message='No auth found'))
-                    log.debug('No valid auth string found for {host}.', host=self.addr.host)
-                    self.transport.loseConnection()
-                    return
-
-                def check_hash(data):
-                    if data:
-                        iterations, salt, hash = data[0][0].split('$')
-                        computed = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), int(iterations))
-                        if computed.hex() != hash:
-                            self.transport.write(rpc_message_build(RPC_TYPE.RPC_FAIL, status=0, message='Invalid password'))
-                            log.debug('Invalid password attempted for {username} from {host}.', username=user, host=self.addr.host)
-                            self.transport.loseConnection()  
-                            return                          
-                        else:
-                            self.transport.write(rpc_message_build(RPC_TYPE.RPC_OK))
-                            log.debug('User {username} logged in successfully from {host}.', username=user, host=self.addr.host)
-                            self.authenticated = True
-                            self.user = user
+                    #read the first line that starts with a null byte
+                    #(IDA license check's MD5Update treats this as an empty line so we can safely put our content without breaking IDA)
+                    if b'\0' in msg.hexrays_license:
+                        user, password = [s.strip() for s in msg.hexrays_license.decode().split('\n\0', 3)[1:]]
+                    elif len(authstr:=msg.hexrays_license.decode().strip().split('\n')) == 2:
+                        #connecting client is third party that doesnt need to follow the ida.key format, also accept that as the auth string
+                        user, password = [s.strip() for s in authstr]
                     else:
-                        self.transport.write(rpc_message_build(RPC_TYPE.RPC_FAIL, status=0, message='Invalid user'))
-                        log.debug('Invalid user {username} attempted from {host}.', username=user, host=self.addr.host)
+                        self.transport.write(rpc_message_build(RPC_TYPE.RPC_FAIL, status=0, message='No auth found'))
+                        log.debug('No valid auth string found for {host}.', host=self.addr.host)
                         self.transport.loseConnection()
                         return
 
-                #sqlite3 accepts a tuple
-                db.runQuery('SELECT password FROM users WHERE name = ?', (user,)).addCallback(check_hash)
+                    def check_hash(data):
+                        if data:
+                            iterations, salt, hash = data[0][0].split('$')
+                            computed = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), int(iterations))
+                            if computed.hex() != hash:
+                                self.transport.write(rpc_message_build(RPC_TYPE.RPC_FAIL, status=0, message='Invalid password'))
+                                log.debug('Invalid password attempted for {username} from {host}.', username=user, host=self.addr.host)
+                                self.transport.loseConnection()
+                                return
+                            else:
+                                self.transport.write(rpc_message_build(RPC_TYPE.RPC_OK))
+                                log.debug('User {username} logged in successfully from {host}.', username=user, host=self.addr.host)
+                                self.authenticated = True
+                                self.user = user
+                        else:
+                            self.transport.write(rpc_message_build(RPC_TYPE.RPC_FAIL, status=0, message='Invalid user'))
+                            log.debug('Invalid user {username} attempted from {host}.', username=user, host=self.addr.host)
+                            self.transport.loseConnection()
+                            return
 
+                    #sqlite3 accepts a tuple
+                    db.runQuery('SELECT password FROM users WHERE name = ?', (user,)).addCallback(check_hash)
                 
+                #no auth check; mainly for debugging purposes
+                else:
+                    self.transport.write(rpc_message_build(RPC_TYPE.RPC_OK))
+                    log.debug('{host} has connected without auth.', host=self.addr.host)
+                    self.authenticated = True
+                    self.user = f'anonymous:{self.addr.host}'
             else:
                 self.transport.write(rpc_message_build(RPC_TYPE.RPC_FAIL, status=0, message='Invalid handshake'))
                 log.debug('Invalid packet type {code} sent from {host} during handshake.', code=pkt.code, host=self.addr.host)
@@ -135,8 +142,12 @@ class LuminaRPC(Protocol):
 
 
 class LuminaRPCFactory(Factory):
+    def __init__(self, reqAuth = True) -> None:
+        super().__init__()
+        self.reqAuth = reqAuth
+
     def buildProtocol(self, addr):
-        return LuminaRPC(addr)
+        return LuminaRPC(addr, self.reqAuth)
 
 if __name__ == "__main__":
     import argparse
@@ -146,6 +157,7 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--port', type=int, default=4443, help='the port to listen on, defaults to 4443')
     parser.add_argument('-c', '--cert', type=argparse.FileType('rb'), default=None, help='enables TLS mode, specifying the certificate path that includes the key')
     parser.add_argument('-db', '--database', type=str, default='data.db', help='database file name, defaults to data.db')
+    parser.add_argument('-na', '--noauth', action='store_true', help='Disable user authentication (for debugging/local use)')
 
     args = parser.parse_args()
 
@@ -179,7 +191,7 @@ if __name__ == "__main__":
     else:
         endpoint = TCP4ServerEndpoint(reactor, port=args.port, interface=args.interface)
         
-    endpoint.listen(LuminaRPCFactory())
+    endpoint.listen(LuminaRPCFactory(not args.noauth))
     globalLogPublisher.addObserver(textFileLogObserver(sys.stdout))
     log.info(f'Server started at {args.interface}:{args.port} (TLS: {args.cert is not None}).')
     reactor.run()
