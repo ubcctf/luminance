@@ -25,6 +25,7 @@ class LuminaRPC(Protocol):
             log.debug('Received {code}: {m}', code=pkt.code, m=msg)  #escape format string
         except StreamError as e:
             log.debug('Invalid data received from {host}: {error}', host=self.addr.host, error=e)
+            self.transport.write(rpc_message_build(RPC_TYPE.RPC_FAIL, status=0, message='Invalid packet'))   #courteous response to avoid IDA from freezing in case it's an actual legit packet that we don't handle yet
             self.transport.loseConnection()
             return
 
@@ -92,7 +93,7 @@ class LuminaRPC(Protocol):
                     for sig in msg.funcInfos:
                         md = next((d for d in data if d[0] == sig.signature), None)
                         if md:
-                            flags.append(0)  #lumina uses 0 as found here
+                            flags.append(ResultType.RES_OK)  #lumina uses 0 as found here
                             mds.append({
                                 'metadata':{
                                     'func_name': md[1],
@@ -100,7 +101,7 @@ class LuminaRPC(Protocol):
                                     'serialized_data': MetadataPayload.parse(md[3])},
                                 'popularity':md[4]})     #report internal ranking as popularity
                         else:
-                            flags.append(1)
+                            flags.append(ResultType.RES_NOT_FOUND)
                     self.transport.write(rpc_message_build(RPC_TYPE.PULL_MD_RESULT, found=flags, results=mds))
                     log.debug('Sent PULL_MD_RESULT: {result}', result=mds)
 
@@ -108,8 +109,8 @@ class LuminaRPC(Protocol):
                     'SELECT * FROM funcs WHERE signature IN (' + ','.join(['?']*len(msg.funcInfos)) + ') ORDER BY rank DESC',
                     tuple([info.signature for info in msg.funcInfos])
                 ).addCallback(reply_pull)
-            elif pkt.code == RPC_TYPE.PUSH_MD:                  
 
+            elif pkt.code == RPC_TYPE.PUSH_MD:
                 def reply_push(data: list):
                     def insert_all_mds(transaction: Transaction):
                         transaction.executemany('INSERT INTO funcs VALUES(?,?,?,?,?,?);', [
@@ -117,10 +118,10 @@ class LuminaRPC(Protocol):
                             info.metadata.func_name, 
                             info.metadata.func_size, 
                             MetadataPayload.build(info.metadata.serialized_data), 
-                            info.metadata.serialized_data.size,
+                            info.metadata.serialized_data.size + len(info.metadata.func_name),
                             self.user)
                         for info in msg.funcInfos])
-                        log.debug('Wrote {count} functions ({new} with higher ranking) into the database.', count=len(msg.funcInfos), new=sum(data))
+                        log.debug('Wrote {count} functions ({new} with higher ranking) into the database.', count=len(msg.funcInfos), new=sum([d == ResultType.RES_ADDED for d in data]))
                         
                     db.runInteraction(insert_all_mds).addCallback(lambda d:   #we just wanna wait, d is ignored
                         self.transport.write(rpc_message_build(RPC_TYPE.PUSH_MD_RESULT, resultsFlags=data)))
@@ -128,10 +129,11 @@ class LuminaRPC(Protocol):
                 def check_data_exists(transaction: Transaction) -> list:
                     exists = []
                     #determine rank of metadata from metadata payload
-                    #for now, rank according to amount of metadata the payload includes (size of MetadataPayload)
+                    #for now, rank according to amount of metadata the payload includes (size of MetadataPayload), and also the length of the function name
+                    #TODO consider time submitted into the weight too? to tiebreak metadata with similar size since the newer one is likely a more useful iteration
                     for info in msg.funcInfos:
-                        transaction.execute('SELECT 1 FROM funcs WHERE signature = ? AND rank >= ?', (info.signature.signature, info.metadata.serialized_data.size))
-                        exists.append(int(transaction.fetchone() is None))  #if doesnt exist we flag it as 1 to signify success to lumina
+                        transaction.execute('SELECT 1 FROM funcs WHERE signature = ? AND rank >= ?', (info.signature.signature, info.metadata.serialized_data.size + len(info.metadata.func_name)))
+                        exists.append(ResultType.RES_ADDED if transaction.fetchone() is None else ResultType.RES_OK)  #if doesnt exist we flag it as 1 to signify success to lumina
                     return exists
                 
                 db.runInteraction(check_data_exists).addCallback(reply_push)
@@ -162,6 +164,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
 
+    #TODO localize by passing log and db into factory
     log = Logger()
 
 
