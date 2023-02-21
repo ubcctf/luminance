@@ -98,7 +98,7 @@ class LuminaRPC(Protocol):
                                 'metadata':{
                                     'func_name': md[1],
                                     'func_size': md[2],
-                                    'serialized_data': MetadataPayload.parse(md[3])},
+                                    'serialized_data': {'data':md[3]}},   #RawCopy accepts raw bytes as data field, so we can skip parsing and rebuilding it every time
                                 'popularity':md[4]})     #report internal ranking as popularity
                         else:
                             flags.append(ResultType.RES_NOT_FOUND)
@@ -117,7 +117,7 @@ class LuminaRPC(Protocol):
                             (info.signature.signature, 
                             info.metadata.func_name, 
                             info.metadata.func_size, 
-                            MetadataPayload.build(info.metadata.serialized_data), 
+                            info.metadata.serialized_data.data, 
                             info.metadata.serialized_data.size + len(info.metadata.func_name),
                             self.user)
                         for info in msg.funcInfos])
